@@ -2,7 +2,6 @@ import streamlit as st
 import numpy as np
 import cv2
 from PIL import Image, ImageDraw
-
 from streamlit_drawable_canvas import st_canvas
 
 
@@ -11,7 +10,7 @@ from streamlit_drawable_canvas import st_canvas
 # ============================================================
 
 st.set_page_config(
-    page_title="SFD & BMD Structural Sketch Interpreter",
+    page_title="Structural Sketch Interpreter",
     page_icon="🏗️",
     layout="wide"
 )
@@ -26,7 +25,7 @@ CANVAS_HEIGHT = 500
 
 
 # ============================================================
-# INITIALIZE SESSION STATE
+# SESSION STATE
 # ============================================================
 
 if "interpreted" not in st.session_state:
@@ -41,26 +40,30 @@ if "members" not in st.session_state:
 if "beam" not in st.session_state:
     st.session_state.beam = None
 
+if "debug_image" not in st.session_state:
+    st.session_state.debug_image = None
+
 
 # ============================================================
-# PAGE TITLE
+# TITLE
 # ============================================================
 
 st.title("🏗️ Structural Sketch Interpreter")
 
 st.markdown(
     """
-Draw a structural system in the **Hand Sketch** canvas.
+Draw a structural system by hand in the canvas below.
 
-The program will read your sketch and gradually convert it into
-a clean structural model.
+The current prototype will:
 
-### Current recognition stage
+1. Capture your hand sketch
+2. Detect horizontal structural members
+3. Create a clean structural model
+4. Display the detected geometry separately
 
-**Hand Sketch → Beam Detection → Structural Model**
+**Current milestone:** Beam/member recognition.
 
-Supports, loads, dimensions, SFD, BMD and deflection will be
-added in later stages.
+Supports, loads, dimensions, SFD, BMD and deflection interpretation will be added progressively.
 """
 )
 
@@ -69,116 +72,160 @@ added in later stages.
 # SIDEBAR
 # ============================================================
 
-st.sidebar.header("✏️ Sketch Settings")
+st.sidebar.header("✏️ Drawing Settings")
 
 stroke_width = st.sidebar.slider(
-    "Pen thickness",
+    "Pen Thickness",
     min_value=1,
-    max_value=15,
-    value=4
+    max_value=10,
+    value=3
 )
 
 stroke_color = st.sidebar.color_picker(
-    "Pen colour",
+    "Stroke Color",
     "#000000"
 )
 
 background_color = st.sidebar.color_picker(
-    "Background colour",
+    "Background Color",
     "#FFFFFF"
 )
 
 
 # ============================================================
-# FUNCTION:
-# PREPARE CANVAS IMAGE
+# IMAGE PREPARATION
 # ============================================================
 
 def prepare_binary_image(image_data):
     """
-    Convert the RGBA canvas image into a binary image.
+    Convert canvas RGBA image into a clean binary image.
 
-    Dark sketch lines become white.
-    Background becomes black.
+    Black/dark drawing → white foreground
+    White background → black background
     """
 
     if image_data is None:
         return None
 
-    # Convert to NumPy array
-    img = np.array(image_data)
+    try:
+        img = np.array(image_data)
 
-    # RGBA -> grayscale
-    gray = cv2.cvtColor(
-        img,
-        cv2.COLOR_RGBA2GRAY
-    )
+        # ----------------------------------------------------
+        # Convert RGBA/RGB to grayscale
+        # ----------------------------------------------------
 
-    # Threshold dark pixels
-    _, binary = cv2.threshold(
-        gray,
-        200,
-        255,
-        cv2.THRESH_BINARY_INV
-    )
+        if len(img.shape) == 3:
 
-    # Remove very small noise
-    kernel = np.ones(
-        (2, 2),
-        np.uint8
-    )
+            if img.shape[2] == 4:
+                gray = cv2.cvtColor(
+                    img,
+                    cv2.COLOR_RGBA2GRAY
+                )
 
-    binary = cv2.morphologyEx(
-        binary,
-        cv2.MORPH_OPEN,
-        kernel
-    )
+            elif img.shape[2] == 3:
+                gray = cv2.cvtColor(
+                    img,
+                    cv2.COLOR_RGB2GRAY
+                )
 
-    return binary
+            else:
+                gray = img[:, :, 0]
+
+        else:
+            gray = img
+
+        # ----------------------------------------------------
+        # Threshold
+        # ----------------------------------------------------
+
+        _, binary = cv2.threshold(
+            gray,
+            200,
+            255,
+            cv2.THRESH_BINARY_INV
+        )
+
+        # ----------------------------------------------------
+        # Remove tiny noise
+        # ----------------------------------------------------
+
+        kernel = np.ones(
+            (2, 2),
+            np.uint8
+        )
+
+        binary = cv2.morphologyEx(
+            binary,
+            cv2.MORPH_OPEN,
+            kernel
+        )
+
+        return binary
+
+    except Exception as e:
+
+        st.error(
+            f"Could not process the sketch image: {e}"
+        )
+
+        return None
 
 
 # ============================================================
-# FUNCTION:
-# DETECT HORIZONTAL LINES
+# HORIZONTAL MEMBER DETECTION
 # ============================================================
 
 def detect_horizontal_members(binary):
-    """
-    Detect approximately horizontal lines using Hough
-    line detection.
 
-    These are potential beams/members.
     """
+    Detect approximately horizontal lines using Hough transform.
 
-    members = []
+    This is intentionally simple at this stage.
+
+    Future versions will recognize:
+    - beams
+    - columns
+    - braces
+    - supports
+    - loads
+    - dimensions
+    """
 
     if binary is None:
-        return members
+        return []
 
+    # --------------------------------------------------------
     # Edge detection
+    # --------------------------------------------------------
+
     edges = cv2.Canny(
         binary,
-        threshold1=50,
-        threshold2=150
+        50,
+        150,
+        apertureSize=3
     )
 
+    # --------------------------------------------------------
     # Hough line detection
+    # --------------------------------------------------------
+
     lines = cv2.HoughLinesP(
         edges,
-
         rho=1,
-
         theta=np.pi / 180,
-
         threshold=40,
-
         minLineLength=80,
-
         maxLineGap=30
     )
 
+    members = []
+
     if lines is None:
         return members
+
+    # --------------------------------------------------------
+    # Filter horizontal lines
+    # --------------------------------------------------------
 
     for line in lines:
 
@@ -187,29 +234,25 @@ def detect_horizontal_members(binary):
         dx = x2 - x1
         dy = y2 - y1
 
-        length = np.sqrt(
-            dx * dx +
-            dy * dy
-        )
-
-        if length == 0:
+        if dx == 0:
             continue
 
         angle = np.degrees(
-            np.arctan2(
-                dy,
-                dx
-            )
+            np.arctan2(dy, dx)
         )
 
-        # Convert angle to 0-90 range
-        angle_abs = abs(angle)
+        # Normalize angle
+        angle = abs(angle)
 
-        if angle_abs > 90:
-            angle_abs = 180 - angle_abs
+        if angle > 90:
+            angle = 180 - angle
 
-        # Accept approximately horizontal lines
-        if angle_abs <= 12:
+        # Approximately horizontal
+        if angle <= 12:
+
+            length = np.sqrt(
+                dx ** 2 + dy ** 2
+            )
 
             members.append(
                 {
@@ -222,40 +265,42 @@ def detect_horizontal_members(binary):
                 }
             )
 
-    # Longest lines first
-    members.sort(
-        key=lambda x: x["length"],
-        reverse=True
-    )
-
     return members
 
 
 # ============================================================
-# FUNCTION:
-# MERGE LINE SEGMENTS
+# MERGE HORIZONTAL MEMBER SEGMENTS
 # ============================================================
 
 def merge_member_segments(members):
-    """
-    HoughLinesP may detect several pieces of the same beam.
 
-    This function combines nearby horizontal segments into
-    one representative structural member.
+    """
+    Merge multiple Hough segments that belong to the same beam.
+
+    At this stage we primarily look for the longest horizontal
+    structural member.
     """
 
     if not members:
         return None
 
-    # Longest detected segment
-    longest = members[0]
+    # --------------------------------------------------------
+    # Select longest detected segment
+    # --------------------------------------------------------
 
-    reference_y = (
+    longest = max(
+        members,
+        key=lambda m: m["length"]
+    )
+
+    y_reference = (
         longest["y1"] +
         longest["y2"]
     ) / 2
 
-    candidate_segments = []
+    tolerance = 40
+
+    related_segments = []
 
     for member in members:
 
@@ -264,55 +309,52 @@ def merge_member_segments(members):
             member["y2"]
         ) / 2
 
-        # Keep segments close to the main beam
-        if abs(y_mid - reference_y) < 40:
+        if abs(y_mid - y_reference) <= tolerance:
 
-            candidate_segments.append(
-                member
-            )
+            related_segments.append(member)
 
-    if not candidate_segments:
-        candidate_segments = [
-            longest
-        ]
+    # --------------------------------------------------------
+    # Find overall horizontal extent
+    # --------------------------------------------------------
 
     x_values = []
-    y_values = []
 
-    for member in candidate_segments:
+    for member in related_segments:
 
-        x_values.extend(
-            [
-                member["x1"],
-                member["x2"]
-            ]
-        )
+        x_values.append(member["x1"])
+        x_values.append(member["x2"])
 
-        y_values.extend(
-            [
-                member["y1"],
-                member["y2"]
-            ]
-        )
+    if not x_values:
+        return longest
 
     x_min = min(x_values)
     x_max = max(x_values)
 
-    y_mid = int(
-        np.median(y_values)
+    # --------------------------------------------------------
+    # Average Y coordinate
+    # --------------------------------------------------------
+
+    y_values = []
+
+    for member in related_segments:
+
+        y_values.append(member["y1"])
+        y_values.append(member["y2"])
+
+    y_average = int(
+        sum(y_values) / len(y_values)
     )
 
     return {
         "x1": int(x_min),
-        "y1": int(y_mid),
+        "y1": y_average,
         "x2": int(x_max),
-        "y2": int(y_mid),
-        "length": int(x_max - x_min)
+        "y2": y_average,
+        "length": float(x_max - x_min)
     }
 
 
 # ============================================================
-# FUNCTION:
 # CREATE CLEAN STRUCTURAL MODEL
 # ============================================================
 
@@ -321,74 +363,70 @@ def create_structural_model(
     height,
     beam
 ):
+
     """
-    Generate a clean engineering representation
-    of the detected beam.
+    Create a clean structural model from detected geometry.
+
+    This is deliberately separate from the original hand sketch.
     """
 
-    img = Image.new(
+    image = Image.new(
         "RGB",
         (width, height),
         "white"
     )
 
-    draw = ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(image)
 
     if beam is None:
-        return img
+        return image
 
     x1 = beam["x1"]
+    y1 = beam["y1"]
+
     x2 = beam["x2"]
-    y = beam["y1"]
+    y2 = beam["y2"]
 
     # --------------------------------------------------------
-    # BEAM
+    # Beam
     # --------------------------------------------------------
 
     draw.line(
-        [
-            (x1, y),
-            (x2, y)
-        ],
+        [(x1, y1), (x2, y2)],
         fill="black",
-        width=5
+        width=6
     )
 
     # --------------------------------------------------------
-    # LEFT NODE
+    # End nodes
     # --------------------------------------------------------
 
-    radius = 6
+    node_radius = 6
 
     draw.ellipse(
         [
-            x1 - radius,
-            y - radius,
-            x1 + radius,
-            y + radius
+            x1 - node_radius,
+            y1 - node_radius,
+            x1 + node_radius,
+            y1 + node_radius
         ],
         fill="black"
     )
 
-    # --------------------------------------------------------
-    # RIGHT NODE
-    # --------------------------------------------------------
-
     draw.ellipse(
         [
-            x2 - radius,
-            y - radius,
-            x2 + radius,
-            y + radius
+            x2 - node_radius,
+            y2 - node_radius,
+            x2 + node_radius,
+            y2 + node_radius
         ],
         fill="black"
     )
 
-    return img
+    return image
 
 
 # ============================================================
-# FUNCTION:
 # CREATE DEBUG IMAGE
 # ============================================================
 
@@ -396,89 +434,254 @@ def create_detection_debug_image(
     binary,
     members
 ):
+
     """
-    Display the line segments detected by OpenCV.
+    Display what the computer vision algorithm detected.
     """
 
     if binary is None:
         return None
 
-    # Binary image -> RGB
+    # Convert binary to RGB
     debug = cv2.cvtColor(
         binary,
         cv2.COLOR_GRAY2RGB
     )
 
-    # Draw detected lines
-    for member in members[:20]:
+    # --------------------------------------------------------
+    # Draw detected segments in green
+    # --------------------------------------------------------
+
+    for member in members:
+
+        x1 = member["x1"]
+        y1 = member["y1"]
+
+        x2 = member["x2"]
+        y2 = member["y2"]
 
         cv2.line(
             debug,
-
-            (
-                member["x1"],
-                member["y1"]
-            ),
-
-            (
-                member["x2"],
-                member["y2"]
-            ),
-
+            (x1, y1),
+            (x2, y2),
             (0, 255, 0),
-
-            2
+            3
         )
 
     return debug
 
 
 # ============================================================
-# HAND SKETCH SECTION
+# FALLBACK: CREATE IMAGE FROM CANVAS JSON
 # ============================================================
 
-st.subheader("1. Hand Sketch")
+def create_image_from_canvas_json(
+    json_data,
+    width,
+    height,
+    background="#FFFFFF"
+):
+
+    """
+    Fallback method for installations where image_data is not
+    available from streamlit-drawable-canvas.
+
+    It converts simple freehand Fabric.js paths into a PIL image.
+    """
+
+    if not json_data:
+        return None
+
+    try:
+
+        image = Image.new(
+            "RGB",
+            (width, height),
+            background
+        )
+
+        draw = ImageDraw.Draw(image)
+
+        objects = json_data.get(
+            "objects",
+            []
+        )
+
+        for obj in objects:
+
+            obj_type = obj.get(
+                "type",
+                ""
+            )
+
+            # ------------------------------------------------
+            # Handle freehand paths
+            # ------------------------------------------------
+
+            if obj_type == "path":
+
+                path_data = obj.get(
+                    "path",
+                    []
+                )
+
+                points = []
+
+                current_x = 0
+                current_y = 0
+
+                for command in path_data:
+
+                    if not command:
+                        continue
+
+                    command_type = command[0]
+
+                    # Move
+                    if command_type == "M":
+
+                        if len(command) >= 3:
+
+                            current_x = float(
+                                command[1]
+                            )
+
+                            current_y = float(
+                                command[2]
+                            )
+
+                            points.append(
+                                (
+                                    current_x,
+                                    current_y
+                                )
+                            )
+
+                    # Line
+                    elif command_type == "L":
+
+                        if len(command) >= 3:
+
+                            current_x = float(
+                                command[1]
+                            )
+
+                            current_y = float(
+                                command[2]
+                            )
+
+                            points.append(
+                                (
+                                    current_x,
+                                    current_y
+                                )
+                            )
+
+                    # Cubic / quadratic curves
+                    elif command_type in ["C", "Q"]:
+
+                        if len(command) >= 3:
+
+                            # For fallback purposes use the
+                            # final coordinate in the command.
+                            try:
+
+                                current_x = float(
+                                    command[-2]
+                                )
+
+                                current_y = float(
+                                    command[-1]
+                                )
+
+                                points.append(
+                                    (
+                                        current_x,
+                                        current_y
+                                    )
+                                )
+
+                            except Exception:
+                                pass
+
+                # ------------------------------------------------
+                # Apply Fabric object positioning
+                # ------------------------------------------------
+
+                left = float(
+                    obj.get("left", 0)
+                )
+
+                top = float(
+                    obj.get("top", 0)
+                )
+
+                scale_x = float(
+                    obj.get("scaleX", 1)
+                )
+
+                scale_y = float(
+                    obj.get("scaleY", 1)
+                )
+
+                if len(points) >= 2:
+
+                    transformed = []
+
+                    for px, py in points:
+
+                        tx = (
+                            left +
+                            px * scale_x
+                        )
+
+                        ty = (
+                            top +
+                            py * scale_y
+                        )
+
+                        transformed.append(
+                            (tx, ty)
+                        )
+
+                    draw.line(
+                        transformed,
+                        fill="black",
+                        width=3
+                    )
+
+        return np.array(image)
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# HAND SKETCH
+# ============================================================
+
+st.header("✏️ Hand Sketch")
 
 st.info(
-    """
-For the first test, draw a simple horizontal beam.
-
-Example:
-
-    ──────────────────────
-
-Once this works, try adding supports and loads.
-"""
+    "Draw the structural system freely. "
+    "For the current version, start with a horizontal beam."
 )
 
 
 # ============================================================
-# DRAWING CANVAS
+# ORIGINAL HAND SKETCH CANVAS
 # ============================================================
 
 canvas_result = st_canvas(
-
     fill_color="rgba(255, 255, 255, 0)",
-
     stroke_width=stroke_width,
-
     stroke_color=stroke_color,
-
     background_color=background_color,
-
     height=CANVAS_HEIGHT,
-
     width=CANVAS_WIDTH,
-
     drawing_mode="freedraw",
-
     display_toolbar=True,
-
-    # Required for reading the rendered image
-    return_image_data=True,
-
-    update_streamlit=True,
-
     key="hand_sketch_canvas"
 )
 
@@ -487,77 +690,121 @@ canvas_result = st_canvas(
 # INTERPRET BUTTON
 # ============================================================
 
-st.markdown("")
+st.write("")
 
-interpret = st.button(
+interpret_button = st.button(
     "🔍 Interpret Sketch",
-    type="primary",
-    use_container_width=True
+    type="primary"
 )
 
 
 # ============================================================
-# INTERPRET SKETCH
+# INTERPRETATION PIPELINE
 # ============================================================
 
-if interpret:
+if interpret_button:
 
     # --------------------------------------------------------
-    # Check whether image data exists
+    # Try to obtain rendered canvas image
     # --------------------------------------------------------
 
-    if canvas_result is None:
+    image_data = getattr(
+        canvas_result,
+        "image_data",
+        None
+    )
+
+    # --------------------------------------------------------
+    # If image_data is unavailable, try JSON fallback
+    # --------------------------------------------------------
+
+    if image_data is None:
+
+        json_data = getattr(
+            canvas_result,
+            "json_data",
+            None
+        )
+
+        if json_data is not None:
+
+            image_data = create_image_from_canvas_json(
+                json_data,
+                CANVAS_WIDTH,
+                CANVAS_HEIGHT,
+                background_color
+            )
+
+    # --------------------------------------------------------
+    # Validate image
+    # --------------------------------------------------------
+
+    if image_data is None:
 
         st.error(
-            "Canvas data could not be read."
+            "Could not read the sketch from the canvas."
         )
 
-    elif canvas_result.image_data is None:
-
-        st.warning(
-            "Please draw something in the canvas first."
+        st.info(
+            "Please draw something and try again."
         )
+
+        st.session_state.interpreted = False
 
     else:
 
         # ----------------------------------------------------
-        # STEP 1
-        # Convert canvas into binary image
+        # Convert sketch to binary image
         # ----------------------------------------------------
 
         binary = prepare_binary_image(
-            canvas_result.image_data
+            image_data
         )
 
-        # ----------------------------------------------------
-        # STEP 2
-        # Detect horizontal lines
-        # ----------------------------------------------------
+        if binary is None:
 
-        members = detect_horizontal_members(
-            binary
-        )
+            st.session_state.interpreted = False
 
-        # ----------------------------------------------------
-        # STEP 3
-        # Merge detected segments
-        # ----------------------------------------------------
+        else:
 
-        beam = merge_member_segments(
-            members
-        )
+            # ------------------------------------------------
+            # Detect horizontal members
+            # ------------------------------------------------
 
-        # ----------------------------------------------------
-        # Store results
-        # ----------------------------------------------------
+            members = detect_horizontal_members(
+                binary
+            )
 
-        st.session_state.binary = binary
+            # ------------------------------------------------
+            # Merge segments
+            # ------------------------------------------------
 
-        st.session_state.members = members
+            beam = merge_member_segments(
+                members
+            )
 
-        st.session_state.beam = beam
+            # ------------------------------------------------
+            # Debug image
+            # ------------------------------------------------
 
-        st.session_state.interpreted = True
+            debug_image = create_detection_debug_image(
+                binary,
+                members
+            )
+
+            # ------------------------------------------------
+            # Store results
+            # ------------------------------------------------
+
+            st.session_state.binary = binary
+
+            st.session_state.members = members
+
+            st.session_state.beam = beam
+
+            st.session_state.debug_image = debug_image
+
+            st.session_state.interpreted = True
 
 
 # ============================================================
@@ -568,57 +815,74 @@ if st.session_state.interpreted:
 
     st.divider()
 
-    st.subheader("2. Structural Model")
+    st.header("🏗️ Structural Model")
 
     beam = st.session_state.beam
 
-    # --------------------------------------------------------
-    # No beam found
-    # --------------------------------------------------------
+    if beam is not None:
 
-    if beam is None:
+        # ----------------------------------------------------
+        # Create clean structural model
+        # ----------------------------------------------------
 
-        st.error(
-            """
-            No horizontal structural member was detected.
-
-            Try drawing a clearer horizontal beam and click
-            **Interpret Sketch** again.
-            """
-        )
-
-    # --------------------------------------------------------
-    # Beam detected
-    # --------------------------------------------------------
-
-    else:
-
-        model_image = create_structural_model(
+        structural_model = create_structural_model(
             CANVAS_WIDTH,
             CANVAS_HEIGHT,
             beam
         )
 
         st.image(
-            model_image,
-            caption="Interpreted Structural Model",
-            use_container_width=True
+            structural_model,
+            caption="Clean Structural Model",
+            use_container_width=False
         )
+
+        # ----------------------------------------------------
+        # Beam information
+        # ----------------------------------------------------
+
+        st.subheader("Detected Geometry")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Member Length",
+                f"{beam['length']:.0f} px"
+            )
+
+        with col2:
+
+            st.metric(
+                "Start X",
+                f"{beam['x1']} px"
+            )
+
+        with col3:
+
+            st.metric(
+                "End X",
+                f"{beam['x2']} px"
+            )
 
         st.success(
-            "Horizontal structural member detected."
+            "Beam detected successfully."
         )
 
-        st.write(
-            f"""
-            **Detected beam geometry**
+    else:
 
-            Start: ({beam['x1']}, {beam['y1']})
+        st.error(
+            "No horizontal structural member was detected."
+        )
 
-            End: ({beam['x2']}, {beam['y2']})
+        st.info(
+            """
+            Try drawing a clearer horizontal beam.
 
-            Approximate canvas length:
-            **{beam['length']} pixels**
+            Example:
+
+            ●━━━━━━━━━━━━━━━━━━━━●
             """
         )
 
@@ -632,130 +896,128 @@ if st.session_state.interpreted:
     st.divider()
 
     with st.expander(
-        "🔧 Interpretation Debug Information"
+        "🔧 Detection Debug Information"
     ):
 
-        binary = st.session_state.binary
+        # ----------------------------------------------------
+        # Binary image
+        # ----------------------------------------------------
 
-        members = st.session_state.members
+        if st.session_state.binary is not None:
 
-        st.write(
-            f"Horizontal line candidates detected: "
-            f"**{len(members)}**"
+            st.subheader(
+                "Processed Binary Image"
+            )
+
+            st.image(
+                st.session_state.binary,
+                caption="Binary image used for detection",
+                use_container_width=False
+            )
+
+        # ----------------------------------------------------
+        # Detected segments
+        # ----------------------------------------------------
+
+        if st.session_state.debug_image is not None:
+
+            st.subheader(
+                "Detected Line Segments"
+            )
+
+            st.image(
+                st.session_state.debug_image,
+                caption="Green lines = detected horizontal segments",
+                use_container_width=False
+            )
+
+        # ----------------------------------------------------
+        # Raw detection information
+        # ----------------------------------------------------
+
+        st.subheader(
+            "Detected Segments"
         )
 
-        # ----------------------------------------------------
-        # Show binary image
-        # ----------------------------------------------------
-
-        if binary is not None:
-
-            st.image(
-                binary,
-                caption="Processed sketch",
-                use_container_width=True
-            )
-
-        # ----------------------------------------------------
-        # Show detected lines
-        # ----------------------------------------------------
-
-        if members:
-
-            debug_image = (
-                create_detection_debug_image(
-                    binary,
-                    members
-                )
-            )
-
-            st.image(
-                debug_image,
-                caption="Detected horizontal line segments",
-                use_container_width=True
-            )
-
-            st.write(
-                "Detected line segments:"
-            )
+        if st.session_state.members:
 
             for i, member in enumerate(
-                members[:10]
+                st.session_state.members
             ):
 
                 st.write(
                     f"""
                     **Segment {i + 1}**
 
-                    Start:
-                    ({member['x1']}, {member['y1']})
+                    Start: ({member['x1']}, {member['y1']})
 
-                    End:
-                    ({member['x2']}, {member['y2']})
+                    End: ({member['x2']}, {member['y2']})
 
-                    Length:
-                    {member['length']:.1f} px
+                    Length: {member['length']:.1f} px
 
-                    Angle:
-                    {member['angle']:.1f}°
+                    Angle: {member.get('angle', 0):.1f}°
                     """
                 )
 
         else:
 
-            st.warning(
-                "No horizontal line segments detected."
+            st.write(
+                "No line segments detected."
             )
 
 
 # ============================================================
-# DEVELOPMENT STATUS
+# CURRENT DEVELOPMENT STATUS
 # ============================================================
 
 st.divider()
 
-st.subheader("Development Status")
+st.subheader("🚧 Development Status")
 
-col1, col2, col3, col4 = st.columns(4)
+status_col1, status_col2, status_col3, status_col4 = st.columns(4)
 
-with col1:
-    st.metric(
-        "Beam",
-        "✓" if st.session_state.beam
-        else "—"
-    )
+with status_col1:
 
-with col2:
-    st.metric(
-        "Supports",
-        "Next"
-    )
+    if st.session_state.beam is not None:
+        st.success("✓ Beam")
+    else:
+        st.warning("○ Beam")
 
-with col3:
-    st.metric(
-        "Loads",
-        "Next"
-    )
+with status_col2:
 
-with col4:
-    st.metric(
-        "SFD / BMD",
-        "Later"
-    )
+    st.info("○ Supports")
 
+with status_col3:
+
+    st.info("○ Loads")
+
+with status_col4:
+
+    st.info("○ SFD / BMD")
+
+
+# ============================================================
+# PIPELINE
+# ============================================================
 
 st.caption(
     """
-Structural interpretation pipeline:
+Current pipeline:
 
 Hand Sketch
-→ Geometry Recognition
+→ Image Processing
+→ Line Recognition
+→ Structural Member
+→ Structural Model
+
+Next:
+
 → Support Recognition
 → Load Recognition
-→ Structural Model
+→ Dimension Recognition
+→ Structural JSON
 → Structural Analysis
-→ SFD
-→ BMD
-→ Deflection
+→ AFD / SFD / BMD
+→ Qualitative Deflection
 """
 )
