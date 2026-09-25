@@ -674,14 +674,14 @@ st.info(
 # ============================================================
 
 canvas_result = st_canvas(
-    fill_color="rgba(255, 255, 255, 0)",
+# fill_color="rgba(255, 255, 255, 0)",
     stroke_width=stroke_width,
     stroke_color=stroke_color,
     background_color=background_color,
     height=CANVAS_HEIGHT,
     width=CANVAS_WIDTH,
     drawing_mode="freedraw",
-    display_toolbar=True,
+# display_toolbar=True,
     key="hand_sketch_canvas"
 )
 
