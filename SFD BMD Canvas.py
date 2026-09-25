@@ -3,6 +3,10 @@ from streamlit_drawable_canvas import st_canvas
 import math
 from PIL import Image, ImageDraw
 
+# =========================================================
+# PAGE
+# =========================================================
+
 st.set_page_config(
     page_title="SFD BMD Calculator",
     layout="wide"
@@ -38,18 +42,17 @@ canvas_height = st.sidebar.number_input(
 )
 
 # =========================================================
-# HAND SKETCH CANVAS
+# HAND SKETCH
 # =========================================================
 
 st.header("1. Hand Sketch")
 
 st.write(
-    "Draw your structural system freely. "
-    "The interpretation will appear below."
+    "Draw the structural system freely below."
 )
 
 canvas_result = st_canvas(
-    fill_color="rgba(255, 255, 255, 0)",
+    fill_color="rgba(255,255,255,0)",
     stroke_width=stroke_width,
     stroke_color="#000000",
     background_color="#FFFFFF",
@@ -60,42 +63,99 @@ canvas_result = st_canvas(
 )
 
 # =========================================================
-# GEOMETRY FUNCTIONS
+# PATH PROCESSING
 # =========================================================
 
-def distance(x1, y1, x2, y2):
+def extract_points(path):
 
-    return math.sqrt(
-        (x2 - x1) ** 2 +
-        (y2 - y1) ** 2
-    )
+    """
+    Extract points from Fabric.js freehand paths.
 
-
-def extract_stroke_points(stroke):
-
-    path = stroke.get("path", [])
+    Handles:
+        M = move
+        L = line
+        Q = quadratic curve
+        C = cubic curve
+    """
 
     points = []
 
-    for item in path:
+    for command in path:
 
-        if len(item) >= 3:
+        if not command:
+            continue
 
-            command = item[0]
+        code = command[0]
 
-            if command in ["M", "L"]:
+        # Move
+        if code == "M" and len(command) >= 3:
 
-                x = item[1]
-                y = item[2]
+            points.append(
+                (
+                    float(command[1]),
+                    float(command[2])
+                )
+            )
 
-                points.append((x, y))
+        # Line
+        elif code == "L" and len(command) >= 3:
+
+            points.append(
+                (
+                    float(command[1]),
+                    float(command[2])
+                )
+            )
+
+        # Quadratic curve
+        elif code == "Q" and len(command) >= 5:
+
+            points.append(
+                (
+                    float(command[3]),
+                    float(command[4])
+                )
+            )
+
+        # Cubic curve
+        elif code == "C" and len(command) >= 7:
+
+            points.append(
+                (
+                    float(command[5]),
+                    float(command[6])
+                )
+            )
 
     return points
 
 
-def get_stroke_geometry(stroke):
+# =========================================================
+# BASIC GEOMETRY
+# =========================================================
 
-    points = extract_stroke_points(stroke)
+def distance(p1, p2):
+
+    return math.sqrt(
+        (p2[0] - p1[0]) ** 2 +
+        (p2[1] - p1[1]) ** 2
+    )
+
+
+def bounding_box(points):
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+
+    return (
+        min(xs),
+        min(ys),
+        max(xs),
+        max(ys)
+    )
+
+
+def stroke_geometry(points):
 
     if len(points) < 2:
         return None
@@ -104,44 +164,475 @@ def get_stroke_geometry(stroke):
     x2, y2 = points[-1]
 
     length = distance(
-        x1,
-        y1,
-        x2,
-        y2
+        (x1, y1),
+        (x2, y2)
     )
 
-    if length < 40:
+    if length < 20:
         return None
 
+    dx = x2 - x1
+    dy = y2 - y1
+
     angle = math.degrees(
-        math.atan2(
-            y2 - y1,
-            x2 - x1
-        )
+        math.atan2(dy, dx)
     )
 
-    # Normalize angle
-    while angle < 0:
-        angle += 180
+    # Convert to 0–180
+    angle = angle % 180
 
-    while angle >= 180:
-        angle -= 180
+    xmin, ymin, xmax, ymax = bounding_box(points)
 
     return {
-        "x1": x1,
-        "y1": y1,
-        "x2": x2,
-        "y2": y2,
+        "points": points,
+        "start": (x1, y1),
+        "end": (x2, y2),
         "length": length,
-        "angle": angle
+        "angle": angle,
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "width": xmax - xmin,
+        "height": ymax - ymin
     }
 
 
 # =========================================================
-# STRUCTURAL MODEL RENDERER
+# STRAIGHTNESS
 # =========================================================
 
-def create_structural_model():
+def straightness(points):
+
+    if len(points) < 3:
+        return 1.0
+
+    p1 = points[0]
+    p2 = points[-1]
+
+    total = distance(p1, p2)
+
+    if total == 0:
+        return 0
+
+    travelled = 0
+
+    for i in range(len(points) - 1):
+
+        travelled += distance(
+            points[i],
+            points[i + 1]
+        )
+
+    if travelled == 0:
+        return 0
+
+    return total / travelled
+
+
+# =========================================================
+# MEMBER DETECTION
+# =========================================================
+
+def is_member(g):
+
+    """
+    Detect long approximately straight strokes.
+    """
+
+    if g["length"] < 100:
+        return False
+
+    s = straightness(g["points"])
+
+    if s < 0.92:
+        return False
+
+    angle = g["angle"]
+
+    # Horizontal
+    horizontal = (
+        angle < 8 or
+        angle > 172
+    )
+
+    # Vertical
+    vertical = (
+        82 < angle < 98
+    )
+
+    # For now, horizontal/vertical members
+    return horizontal or vertical
+
+
+# =========================================================
+# POINT LOAD DETECTION
+# =========================================================
+
+def is_vertical_stroke(g):
+
+    angle = g["angle"]
+
+    return (
+        82 < angle < 98
+    )
+
+
+def is_point_load_candidate(g):
+
+    """
+    Detect a vertical stroke which is shorter than
+    a structural member.
+
+    This is only the first-stage detector.
+    """
+
+    if g["length"] < 25:
+        return False
+
+    if g["length"] > 250:
+        return False
+
+    if not is_vertical_stroke(g):
+        return False
+
+    return True
+
+
+# =========================================================
+# SUPPORT DETECTION
+# =========================================================
+
+def classify_support_group(
+    nearby_strokes,
+    beam_x,
+    beam_y
+):
+
+    """
+    Heuristic support recognition.
+
+    This is intentionally conservative.
+    """
+
+    if len(nearby_strokes) < 2:
+        return None
+
+    vertical_count = 0
+    diagonal_count = 0
+    horizontal_count = 0
+
+    for g in nearby_strokes:
+
+        angle = g["angle"]
+
+        if 82 < angle < 98:
+            vertical_count += 1
+
+        elif (
+            15 < angle < 75 or
+            105 < angle < 165
+        ):
+            diagonal_count += 1
+
+        else:
+            horizontal_count += 1
+
+    # Fixed support:
+    # vertical wall + hatch-like diagonals
+    if (
+        vertical_count >= 1 and
+        diagonal_count >= 2
+    ):
+        return "Fixed Support"
+
+    # Pin / roller:
+    # diagonal strokes around beam end
+    if diagonal_count >= 2:
+
+        # If circular-looking short strokes exist,
+        # classify as roller.
+        circular_candidates = 0
+
+        for g in nearby_strokes:
+
+            if (
+                g["width"] > 5 and
+                g["height"] > 5 and
+                g["width"] < 60 and
+                g["height"] < 60
+            ):
+                circular_candidates += 1
+
+        if circular_candidates >= 1:
+            return "Roller Support"
+
+        return "Pin Support"
+
+    return None
+
+
+# =========================================================
+# INTERPRET SKETCH
+# =========================================================
+
+def interpret_sketch():
+
+    if canvas_result.json_data is None:
+
+        return {
+            "members": [],
+            "loads": [],
+            "supports": [],
+            "strokes": []
+        }
+
+    objects = canvas_result.json_data.get(
+        "objects",
+        []
+    )
+
+    strokes = []
+
+    for index, obj in enumerate(objects):
+
+        if obj.get("type") != "path":
+            continue
+
+        path = obj.get("path", [])
+
+        points = extract_points(path)
+
+        geometry = stroke_geometry(points)
+
+        if geometry is None:
+            continue
+
+        geometry["stroke_id"] = index
+
+        strokes.append(
+            geometry
+        )
+
+    members = []
+    load_candidates = []
+
+    # -----------------------------------------------------
+    # MEMBER / LOAD CANDIDATES
+    # -----------------------------------------------------
+
+    for g in strokes:
+
+        if is_member(g):
+
+            members.append(g)
+
+        elif is_point_load_candidate(g):
+
+            load_candidates.append(g)
+
+    # -----------------------------------------------------
+    # SUPPORT DETECTION
+    # -----------------------------------------------------
+
+    supports = []
+
+    # Look around ends of detected members
+
+    for member in members:
+
+        endpoints = [
+            member["start"],
+            member["end"]
+        ]
+
+        for endpoint in endpoints:
+
+            ex, ey = endpoint
+
+            nearby = []
+
+            for stroke in strokes:
+
+                if stroke is member:
+                    continue
+
+                sx, sy = stroke["start"]
+                tx, ty = stroke["end"]
+
+                d1 = distance(
+                    (ex, ey),
+                    (sx, sy)
+                )
+
+                d2 = distance(
+                    (ex, ey),
+                    (tx, ty)
+                )
+
+                if min(d1, d2) < 80:
+
+                    nearby.append(stroke)
+
+            support_type = classify_support_group(
+                nearby,
+                ex,
+                ey
+            )
+
+            if support_type:
+
+                supports.append(
+                    {
+                        "type": support_type,
+                        "position": [ex, ey]
+                    }
+                )
+
+    return {
+        "members": members,
+        "loads": load_candidates,
+        "supports": supports,
+        "strokes": strokes
+    }
+
+
+# =========================================================
+# CLEAN STRUCTURAL MODEL
+# =========================================================
+
+def draw_pin(
+    draw,
+    x,
+    y
+):
+
+    size = 25
+
+    draw.polygon(
+        [
+            (x, y),
+            (x - size, y + size),
+            (x + size, y + size)
+        ],
+        outline="black",
+        fill="white"
+    )
+
+    draw.line(
+        [
+            (x - size - 10, y + size),
+            (x + size + 10, y + size)
+        ],
+        fill="black",
+        width=3
+    )
+
+
+def draw_roller(
+    draw,
+    x,
+    y
+):
+
+    size = 22
+
+    draw.polygon(
+        [
+            (x, y),
+            (x - size, y + size),
+            (x + size, y + size)
+        ],
+        outline="black",
+        fill="white"
+    )
+
+    r = 7
+
+    draw.ellipse(
+        [
+            x - 16,
+            y + size,
+            x - 2,
+            y + size + 14
+        ],
+        outline="black",
+        width=2
+    )
+
+    draw.ellipse(
+        [
+            x + 2,
+            y + size,
+            x + 16,
+            y + size + 14
+        ],
+        outline="black",
+        width=2
+    )
+
+
+def draw_fixed(
+    draw,
+    x,
+    y
+):
+
+    wall_height = 55
+
+    draw.line(
+        [
+            (x, y - wall_height),
+            (x, y + wall_height)
+        ],
+        fill="black",
+        width=5
+    )
+
+    for yy in range(
+        int(y - wall_height),
+        int(y + wall_height),
+        10
+    ):
+
+        draw.line(
+            [
+                (x, yy),
+                (x - 15, yy + 10)
+            ],
+            fill="black",
+            width=2
+        )
+
+
+def draw_point_load(
+    draw,
+    x,
+    y
+):
+
+    length = 70
+
+    draw.line(
+        [
+            (x, y - length),
+            (x, y)
+        ],
+        fill="black",
+        width=4
+    )
+
+    draw.polygon(
+        [
+            (x, y),
+            (x - 9, y - 16),
+            (x + 9, y - 16)
+        ],
+        fill="black"
+    )
+
+
+def render_model(model):
 
     image = Image.new(
         "RGB",
@@ -154,38 +645,14 @@ def create_structural_model():
 
     draw = ImageDraw.Draw(image)
 
-    if canvas_result.json_data is None:
-        return image, []
+    # -----------------------------------------------------
+    # BEAMS
+    # -----------------------------------------------------
 
-    objects = canvas_result.json_data.get(
-        "objects",
-        []
-    )
+    for member in model["members"]:
 
-    detected_members = []
-
-    for obj in objects:
-
-        if obj.get("type") != "path":
-            continue
-
-        geometry = get_stroke_geometry(obj)
-
-        if geometry is None:
-            continue
-
-        x1 = geometry["x1"]
-        y1 = geometry["y1"]
-        x2 = geometry["x2"]
-        y2 = geometry["y2"]
-
-        detected_members.append(
-            geometry
-        )
-
-        # -------------------------------------------------
-        # CLEAN MEMBER
-        # -------------------------------------------------
+        x1, y1 = member["start"]
+        x2, y2 = member["end"]
 
         draw.line(
             [
@@ -196,33 +663,53 @@ def create_structural_model():
             width=5
         )
 
-        # -------------------------------------------------
-        # CLEAN NODES
-        # -------------------------------------------------
+    # -----------------------------------------------------
+    # SUPPORTS
+    # -----------------------------------------------------
 
-        node_radius = 6
+    for support in model["supports"]:
 
-        draw.ellipse(
-            [
-                x1 - node_radius,
-                y1 - node_radius,
-                x1 + node_radius,
-                y1 + node_radius
-            ],
-            fill="black"
+        x, y = support["position"]
+
+        if support["type"] == "Pin Support":
+
+            draw_pin(
+                draw,
+                x,
+                y
+            )
+
+        elif support["type"] == "Roller Support":
+
+            draw_roller(
+                draw,
+                x,
+                y
+            )
+
+        elif support["type"] == "Fixed Support":
+
+            draw_fixed(
+                draw,
+                x,
+                y
+            )
+
+    # -----------------------------------------------------
+    # POINT LOADS
+    # -----------------------------------------------------
+
+    for load in model["loads"]:
+
+        x, y = load["start"]
+
+        draw_point_load(
+            draw,
+            x,
+            y
         )
 
-        draw.ellipse(
-            [
-                x2 - node_radius,
-                y2 - node_radius,
-                x2 + node_radius,
-                y2 + node_radius
-            ],
-            fill="black"
-        )
-
-    return image, detected_members
+    return image
 
 
 # =========================================================
@@ -231,7 +718,7 @@ def create_structural_model():
 
 st.divider()
 
-interpret = st.button(
+interpret_button = st.button(
     "Interpret Sketch",
     type="primary"
 )
@@ -242,14 +729,17 @@ interpret = st.button(
 
 st.header("2. Structural Model")
 
-st.write(
-    "The interpreted structural model will appear here "
-    "as clean geometric objects."
-)
+if interpret_button:
 
-if interpret:
+    model = interpret_sketch()
 
-    structural_image, members = create_structural_model()
+    # -----------------------------------------------------
+    # CLEAN MODEL CANVAS
+    # -----------------------------------------------------
+
+    structural_image = render_model(
+        model
+    )
 
     st.image(
         structural_image,
@@ -257,57 +747,100 @@ if interpret:
     )
 
     # -----------------------------------------------------
-    # MODEL DATA
+    # INTERPRETATION
     # -----------------------------------------------------
 
-    st.subheader("Detected Structural Model")
+    st.subheader(
+        "3. Interpretation"
+    )
 
-    if not members:
+    col1, col2, col3 = st.columns(3)
 
-        st.warning(
-            "No structural members were detected."
+    with col1:
+
+        st.metric(
+            "Members",
+            len(model["members"])
         )
 
-    else:
+    with col2:
 
-        st.success(
-            f"{len(members)} structural member(s) detected."
+        st.metric(
+            "Point-load candidates",
+            len(model["loads"])
         )
+
+    with col3:
+
+        st.metric(
+            "Supports",
+            len(model["supports"])
+        )
+
+    # -----------------------------------------------------
+    # DETAILS
+    # -----------------------------------------------------
+
+    st.write("### Detected Members")
+
+    if model["members"]:
 
         for i, member in enumerate(
-            members,
+            model["members"],
             start=1
         ):
 
             st.write(
-                f"**Member {i}**"
+                f"**Member {i}** — "
+                f"({member['start'][0]:.0f}, "
+                f"{member['start'][1]:.0f}) → "
+                f"({member['end'][0]:.0f}, "
+                f"{member['end'][1]:.0f})"
             )
 
-            st.write(
-                f"Start: "
-                f"({member['x1']:.1f}, "
-                f"{member['y1']:.1f})"
-            )
+    else:
+
+        st.write(
+            "No members detected."
+        )
+
+    st.write("### Detected Supports")
+
+    if model["supports"]:
+
+        for support in model["supports"]:
 
             st.write(
-                f"End: "
-                f"({member['x2']:.1f}, "
-                f"{member['y2']:.1f})"
+                f"{support['type']} at "
+                f"{support['position']}"
             )
 
-            st.write(
-                f"Length: "
-                f"{member['length']:.1f} px"
-            )
+    else:
+
+        st.write(
+            "No supports detected yet."
+        )
+
+    st.write("### Point-load Candidates")
+
+    if model["loads"]:
+
+        for load in model["loads"]:
 
             st.write(
-                f"Angle: "
-                f"{member['angle']:.1f}°"
+                f"Vertical load candidate at "
+                f"({load['start'][0]:.0f}, "
+                f"{load['start'][1]:.0f})"
             )
+
+    else:
+
+        st.write(
+            "No point-load candidates detected."
+        )
 
 else:
 
-    # Empty structural model canvas
     empty_image = Image.new(
         "RGB",
         (
@@ -323,6 +856,6 @@ else:
     )
 
     st.info(
-        "Draw your structure above and click "
+        "Draw a structural sketch above and click "
         "'Interpret Sketch'."
     )
